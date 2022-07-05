@@ -1,5 +1,7 @@
 # Winston ERC20 Token Smart Contract
 
+![image](https://dropbox.winston.services/official-logos/Winston_Logo_Official.png)
+
 Welcome to Winston Services. Winston is your personal assistant to blockchain, and is here to guide you along your jouney in to decentralized finance.
 This repository contains the solidity contract for the Winston Token which was release on the Binance Smart Chain.
 
@@ -7,9 +9,14 @@ This repository contains the solidity contract for the Winston Token which was r
     
     0x75578ebbefe274f240b8e1b5859ca34f342157d9
 
-> Total Supply : 100 Million
-> Total Burned : Approx 10 Million
-> Total Locked : 50 Million
+| Total Supply | 100 Million |
+| ------------ | ----------- |
+
+| Total Burned | Approx 10 Million |
+| ------------ | ----------------- |
+
+| Total Locked | 50 Million |
+| ------------ | ---------- |
 
 There was originally 100 million Winston created, and 50 Million of it was sent to the contract where it's locked.
 
