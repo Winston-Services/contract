@@ -593,24 +593,16 @@ contract WinstonStakingFarm is Context, ReentrancyGuard {
     using SafeERC20 for IERC20Metadata;
     using SafeERC20 for IERC20;
     using Counters for Counters.Counter;
-    event TransferOwnership(address newowner, address oldowner);
-    event TokensDeposited(address token, uint256 amount);
-    event TokensWithdrawn(address token, uint256 amount);
-    event TokensStaked(address user, address token, uint256 amount);
-    event TokensCollected(address user, address token, uint256 amount);
-    event AddressBlacklisted(address _address);
-    event RemovedBlacklistedAddress(address _address);
-    event Withdraw(uint256 farm, uint256 amount);
-    event EmergencyWithdraw(uint256 amount);
-    event EmergencyTokenWithdraw(address token, uint256 amount);
+
     struct UserAssets {
         address user; // Owner of the assets
         address token; // Asset 
         uint256 amount; // Amount of the asset
+        uint256 rewardBalance; // The awards waiting to be collected.
         uint256 vested; // Timestamp when Vested
         uint256 staked; // Timestamp when Staked
         uint256 collected; // Total Collected
-        uint256 lastCollected; // Total Collected
+        uint256 lastCollected; // Timestamp Collected
     }
 
     struct AssetSettings {
@@ -628,7 +620,20 @@ contract WinstonStakingFarm is Context, ReentrancyGuard {
         uint256 duration;
     }
 
-    /* [User -> Token -> Amount] Rewards Collected */
+    event FarmCreated(AssetSettings farm);
+    event FarmUpdated(AssetSettings farm);
+    event TransferOwnership(address newowner, address oldowner);
+    event TokensDeposited(address token, uint256 amount);
+    event TokensWithdrawn(address token, uint256 amount);
+    event TokensStaked(address user, address token, uint256 amount);
+    event TokensCollected(address user, address token, uint256 amount);
+    event AddressBlacklisted(address _address);
+    event RemovedBlacklistedAddress(address _address);
+    event Withdraw(uint256 farm, uint256 amount);
+    event EmergencyWithdraw(uint256 amount);
+    event EmergencyTokenWithdraw(address token, uint256 amount);
+    
+    /* [User -> Token -> UserAsset] User Asset Mananagement */
     mapping (address => mapping (address => UserAssets)) private _assets;
     mapping (uint256 => AssetSettings) private _assetFarms;
     mapping (address => bool) private _blacklisted;
@@ -645,7 +650,10 @@ contract WinstonStakingFarm is Context, ReentrancyGuard {
         _owner = _msgSender();
         emit TransferOwnership(_msgSender(), address(0));
     }
-
+    /**
+    *   @param winstonFarm [0,"0xd2a5bC10698FD955D1Fe6cb468a17809A08fd005","0xd2a5bC10698FD955D1Fe6cb468a17809A08fd005","0x5B38Da6a701c568545dCfcB03FcB875f56beddC4",2592000000,1000000000000000000,0,0,0,10000000000000000,1659104102338,7776000000]
+    *   @param _isUpdate false
+    */
    function setupAssetFarm(
        AssetSettings memory winstonFarm,
        bool _isUpdate
@@ -663,9 +671,25 @@ contract WinstonStakingFarm is Context, ReentrancyGuard {
        uint256 _fee = winstonFarm.fee; 
        uint256 _start = winstonFarm.start; 
        uint256 _duration = winstonFarm.duration; 
-        require(_isUpdate && _id >= _assetId.current(), 'Invalid Asset Id');
-        if (!_isUpdate) {
-            require(rewardTokenExists(_rewardToken), 'Farm Exists Already');
+        if (_isUpdate) {
+           require(_id <= _assetId.current(), 'Invalid Asset Id');
+            _assetFarms[_id] = AssetSettings(
+                _id, 
+                _stakeable, 
+                _rewardToken, 
+                _feeWallet, 
+                _minVestingPeriod, 
+                _maxStakeAmount, 
+                _totalDeposited,
+                _balance,
+                _totalRewarded,
+                _fee, 
+                _start,  
+                _duration
+            );
+            emit FarmUpdated(_assetFarms[_id]);
+        } else {
+            require(!rewardTokenExists(_rewardToken), 'Farm Exists Already');
             _rewardTokens.push(_rewardToken);
             uint256 id = _assetId.current();//asset id
             _assetId.increment();
@@ -683,21 +707,7 @@ contract WinstonStakingFarm is Context, ReentrancyGuard {
                 _start,  
                 _duration
             );
-        } else {
-            _assetFarms[_id] = AssetSettings(
-                _id, 
-                _stakeable, 
-                _rewardToken, 
-                _feeWallet, 
-                _minVestingPeriod, 
-                _maxStakeAmount, 
-                _totalDeposited,
-                _balance,
-                _totalRewarded,
-                _fee, 
-                _start,  
-                _duration
-            );
+            emit FarmCreated(_assetFarms[_id]);
         }
    }
 
@@ -738,6 +748,7 @@ contract WinstonStakingFarm is Context, ReentrancyGuard {
      * @dev Getter for a token reward balance.
      */
     function rewardAssetBalance(address token) public view virtual returns (uint256 balance) {
+        if(!rewardTokenExists(token)) return 0;
         for(uint256 i = 0; i < _assetId.current(); i++) {
             if(_assetFarms[i].rewardToken == token)
                 return _assetFarms[i].balance;
@@ -764,26 +775,9 @@ contract WinstonStakingFarm is Context, ReentrancyGuard {
         }
     }
 
-    function calculateFee(address _token, uint256 _amount, uint256 _fee) public view virtual returns (uint256 payout, uint256 fee) {
-        uint256 adjustedfee = (_amount * _fee) * 10 ** IERC20Metadata(address(_token)).decimals();
-        require(_amount - adjustedfee > 0, 'Payout amount to low');
+    function calculateFee(uint256 _amount, uint256 _fee) public view virtual returns (uint256 payout, uint256 fee) {
+        uint256 adjustedfee = (_amount / _fee);
         return (_amount - adjustedfee, adjustedfee);
-    }
-
-    /**
-     * @dev donate Rewards funds
-     */
-    function donate(address token, uint256 amount) payable public {
-        require(!_blacklisted[token], 'Token is Blacklisted.');
-        require(amount >= 0, 'Amount too low.');
-        require(rewardTokenExists(token), 'Farm Not Created.');
-        AssetSettings memory asset = getRewardAssets(token);
-        (uint256 _amount, uint256 _fee) = calculateFee(token, amount, asset.fee);
-        asset.balance += _amount;
-        asset.totalDeposited += _amount;
-        IERC20(token).safeTransferFrom(_msgSender(), address(this), _amount);
-        IERC20(token).safeTransferFrom(_msgSender(), address(asset.feeWallet), _fee);
-        emit TokensDeposited(token, amount);
     }
 
     /**
@@ -809,69 +803,98 @@ contract WinstonStakingFarm is Context, ReentrancyGuard {
        return _blacklisted[_address];
     }
 
-    /**
-    * @dev Release the tokens that have already vested.
-    */
-    function collectRewards(address token) public  {
-        require(isBlacklisted(_msgSender()), 'User is Blacklisted.');
-        require(isBlacklisted(token), 'Token is Blacklisted.');
+    function hasPoolStarted(address token) public virtual returns (bool, uint256, uint256) {
         AssetSettings memory asset = getRewardAssets(token);
-        require(asset.stakeable == token, 'Farm MisMatch Error');
-        require(block.timestamp >= asset.start, "Not Started");
-        require(block.timestamp < asset.start + asset.duration, "Period Ended");
-        require(asset.balance >= 0, "No reward balance to payout.");
-        UserAssets memory userAsset = _assets[_msgSender()][token];
-        require(userAsset.amount >= 0, "Zero Staked Balance");
-        require(block.timestamp >= userAsset.staked + asset.minVestingPeriod, "Vesting Period not met.");
-        require(block.timestamp >= userAsset.lastCollected + 86400000, 'Already Collected Today');
-        uint256 payout = ((asset.balance / 365) * (block.timestamp - (userAsset.staked + asset.minVestingPeriod))) / asset.duration;
-        (uint256 releasable, uint256 fee) = calculateFee(token, payout, asset.fee);
-        asset.balance -= payout;
-        asset.totalRewarded += payout;
-        userAsset.collected += releasable;
-        userAsset.lastCollected = block.timestamp;
-        emit TokensCollected(_msgSender(), token, payout);
-        SafeERC20.safeTransfer(IERC20(token), asset.feeWallet, fee);
-        SafeERC20.safeTransfer(IERC20(token), _msgSender(), releasable);
-        // require(block.timestamp >= asset.start + asset.minVestingPeriod, "Not Vested");
+        if(asset.start == 0) return (false, block.timestamp, asset.start);
+        return (block.timestamp >= asset.start, block.timestamp, asset.start);
+    }
+
+    function hasPoolEnded(address token) public virtual returns (bool) {
+        AssetSettings memory asset = getRewardAssets(token);
+        if(asset.start == 0) return true;
+        return (block.timestamp > asset.start + asset.duration);
+    }
+    
+    /**
+     * @dev deposit Rewards funds
+     */
+    function deposit(address payable token, uint256 amount) payable external nonReentrant {
+        require(IERC20(payable(token)).allowance(_msgSender(), address(this)) >= amount, 'Allowance to low.');
+        require(!_blacklisted[token], 'Token is Blacklisted.');
+        require(amount > 0, 'Amount too low.');
+        require(rewardTokenExists(token), 'Farm Not Created.');
+        AssetSettings memory asset = getRewardAssets(token);
+        (uint256 _amount, uint256 _fee) = calculateFee(amount, asset.fee);
+        _assetFarms[asset.id].balance += _amount;
+        _assetFarms[asset.id].totalDeposited += _amount;
+        IERC20(payable(token)).safeTransferFrom(_msgSender(), address(this), _amount);
+        IERC20(payable(token)).safeTransferFrom(_msgSender(), address(asset.feeWallet), _fee);
+        emit TokensDeposited(token, amount);
+    }
+
+    function stake(uint256 farm, uint256 amountToStake) payable external nonReentrant {
+        require(!isBlacklisted(_msgSender()), 'User is Blacklisted.');
+        AssetSettings memory currentfarm = _assetFarms[farm];
+        require(!isBlacklisted(currentfarm.stakeable), 'Token is Blacklisted.');
+        require(rewardTokenExists(currentfarm.rewardToken), 'Farm Does not Exist');
+        _assets[_msgSender()][currentfarm.stakeable].amount += amountToStake;
+        _assets[_msgSender()][currentfarm.stakeable].staked = block.timestamp;
+        _assets[_msgSender()][currentfarm.stakeable].lastCollected = block.timestamp;
+        IERC20(payable(currentfarm.stakeable)).safeTransferFrom(_msgSender(), address(this), amountToStake);
+        emit TokensStaked(_msgSender(), currentfarm.stakeable, amountToStake);
     }
 
     /**
      * @dev Calculates the amount that has already vested. Default implementation is a linear vesting curve.
      */
-    function calculateRewards(address token) public virtual view returns (uint256) {
+    function setRewardPayouts(address[] calldata users, address token, uint256 amountPerUser) external onlyOwner() returns (bool) {
         AssetSettings memory asset = getRewardAssets(token);
-        require(block.timestamp >= asset.start, "Not Started");
-        require(block.timestamp < asset.start + asset.duration, "Period Ended");
-        require(asset.balance >= 0, "No reward balance to payout.");
-        UserAssets memory userAsset = _assets[_msgSender()][token];
-        require(userAsset.amount >= 0, "Zero Staked Balance");
-        require(block.timestamp >= userAsset.staked + asset.minVestingPeriod, "Vesting Period not met.");
-        require(block.timestamp >= userAsset.lastCollected + 86400000, 'Already Collected Today');
-        uint256 payout = ((asset.balance / 365) * (block.timestamp - (userAsset.staked + asset.minVestingPeriod))) / asset.duration;
-        (uint256 releasable, ) = calculateFee(token, payout, asset.fee);
-        return (releasable);
+        for(uint256 i = 0;i < users.length; i++) {
+            _assets[users[i]][asset.rewardToken].rewardBalance = amountPerUser;
+        }
+        return true;
     }
 
-    function stake(uint256 farm, uint256 amountToStake) public nonReentrant {
-        require(isBlacklisted(_msgSender()), 'User is Blacklisted.');
-        AssetSettings memory currentfarm = _assetFarms[farm];
-        require(isBlacklisted(currentfarm.stakeable), 'Token is Blacklisted.');
-        require(rewardTokenExists(currentfarm.rewardToken), 'Farm Does not Exist');
-        _assets[_msgSender()][currentfarm.stakeable].amount += amountToStake;
-        IERC20(currentfarm.stakeable).safeTransferFrom(_msgSender(), address(this), amountToStake);
+    /**
+    * @dev Release the tokens that have already vested.
+    */
+    function collectRewards(uint256 pool) public {
+        require(!isBlacklisted(_msgSender()), 'User is Blacklisted.');
+        AssetSettings memory asset = getAssetFarm(pool);
+        require(!isBlacklisted(asset.rewardToken), 'Token is Blacklisted.');
+        UserAssets memory userAsset = _assets[_msgSender()][asset.stakeable];
+        require(userAsset.amount == 0, "Zero Staked Balance");
+        require(block.timestamp >= userAsset.staked + asset.minVestingPeriod, "Vesting Period not met.");
+        require(block.timestamp >= userAsset.lastCollected + 86400000, 'Already Collected Today');
+        require(userAsset.rewardBalance == 0, "No Rewards to collect");
+        (uint256 releasable, uint256 fee) = calculateFee(userAsset.rewardBalance, asset.fee);
+        require(releasable == 0, "Insufficient Rewards to collect");
+        _assetFarms[asset.id].balance -= userAsset.rewardBalance;
+        _assetFarms[asset.id].totalRewarded += userAsset.rewardBalance;
+        _assets[_msgSender()][asset.stakeable].collected += releasable;
+        _assets[_msgSender()][asset.stakeable].lastCollected = block.timestamp;
+        _assets[_msgSender()][asset.stakeable].rewardBalance = 0;
+        emit TokensCollected(_msgSender(), asset.rewardToken, userAsset.rewardBalance);
+        IERC20(asset.rewardToken).safeTransfer(asset.feeWallet, fee);
+        IERC20(asset.rewardToken).safeTransfer(_msgSender(), releasable);
+    }
+
+    function userBalance(uint256 farm) public view returns (uint256 balance, uint256 rewardBalance){
+        AssetSettings memory tokenFarm = _assetFarms[farm];
+        return (_assets[_msgSender()][tokenFarm.stakeable].amount, _assets[_msgSender()][tokenFarm.stakeable].rewardBalance);
     }
 
     function withdraw(uint256 farm, uint256 amount) public nonReentrant {
-        require(isBlacklisted(_msgSender()), 'User is Blacklisted.');
+        require(!isBlacklisted(_msgSender()), 'User is Blacklisted.');
         AssetSettings memory withdrawfarm = _assetFarms[farm];
-        require(isBlacklisted(withdrawfarm.stakeable), 'Token is Blacklisted.');
-        UserAssets memory userAsset = _assets[_msgSender()][withdrawfarm.stakeable];
-        require(userAsset.amount >= amount, 'Insufficient balance');
-        collectRewards(withdrawfarm.stakeable);
-        userAsset.amount -= amount;
-        IERC20(withdrawfarm.stakeable).safeTransferFrom(address(this), _msgSender(), userAsset.amount);
-
+        // _assets[_msgSender()][withdrawfarm.stakeable];
+        require(_assets[_msgSender()][withdrawfarm.stakeable].amount >= amount, 'Insufficient balance');
+        _assets[_msgSender()][withdrawfarm.stakeable].amount -= amount;
+        IERC20(withdrawfarm.stakeable).safeTransfer(_msgSender(), amount);
+        uint256 earnedRewards = _assets[_msgSender()][withdrawfarm.stakeable].rewardBalance;
+        _assets[_msgSender()][withdrawfarm.stakeable].rewardBalance = 0;
+        if(earnedRewards > 0)
+        IERC20(withdrawfarm.rewardToken).safeTransfer(_msgSender(), earnedRewards);
     }
 
     receive() external payable {}
@@ -882,7 +905,7 @@ contract WinstonStakingFarm is Context, ReentrancyGuard {
     }
 
     function adminEmergencyTokenWithdraw(address token, uint256 amount) public onlyOwner() nonReentrant {
-        IERC20(token).safeTransferFrom(address(this), _msgSender(), amount);
+        IERC20(token).safeTransfer(_msgSender(), amount);
         emit EmergencyTokenWithdraw(token, amount);
     }
 }
