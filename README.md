@@ -1,6 +1,5 @@
 # Winston ERC20 Token Smart Contract!
-
-![Winston Official Logo](https://user-images.githubusercontent.com/29209354/182711343-592f511c-6228-4559-871a-0572d4487995.png)
+![Winston Official Logo](https://user-images.githubusercontent.com/29209354/182712631-e27df2b9-5c8e-4286-a6ac-4324ff0527f9.png)
 
 Welcome to Winston Services. Winston is your personal assistant to blockchain, and is here to guide you along your jouney in to decentralized finance.
 This repository contains the solidity contract for the Winston Token which was release on the Binance Smart Chain.
